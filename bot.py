@@ -5,7 +5,7 @@ Jitsi Audio Recording Bot
 Usage:
     python3.9 bot.py --room myroom --output recording.wav
     python3.9 bot.py --room myroom --duration 60 --output recording.wav
-    python3.9 bot.py --room myroom --server meet.jit.si --output out.wav
+    python3.9 bot.py --room myroom --host meet.jit.si --output out.wav
     python3.9 bot.py --room myroom --token "eyJ..." --output out.wav
 """
 
@@ -42,9 +42,20 @@ def main():
         help="Output WAV file path (default: recording.wav)",
     )
     parser.add_argument(
-        "--server",
+        "--host", "--server",
+        dest="server",
         default="meet.jit.si",
-        help="Jitsi server domain (default: meet.jit.si)",
+        help="Jitsi host/domain (default: meet.jit.si). --server is kept as alias.",
+    )
+    parser.add_argument(
+        "--xmpp-domain",
+        default=None,
+        help="Override XMPP auth domain (optional, e.g. guest.meet.example.com)",
+    )
+    parser.add_argument(
+        "--conference-domain",
+        default=None,
+        help="Override MUC domain (optional, e.g. conference.meet.example.com)",
     )
     parser.add_argument(
         "--duration",
@@ -69,6 +80,10 @@ def main():
     logger = logging.getLogger("bot")
     logger.info(f"Jitsi Audio Bot starting")
     logger.info(f"  Server : {args.server}")
+    if args.xmpp_domain:
+        logger.info(f"  XMPP Domain: {args.xmpp_domain}")
+    if args.conference_domain:
+        logger.info(f"  Conference Domain: {args.conference_domain}")
     logger.info(f"  Room   : {args.room}")
     logger.info(f"  Output : {args.output}")
     if args.duration:
@@ -82,6 +97,8 @@ def main():
         output_path=args.output,
         duration=args.duration,
         token=args.token,
+        xmpp_domain=args.xmpp_domain,
+        conference_domain=args.conference_domain,
     )
 
     try:

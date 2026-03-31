@@ -24,12 +24,16 @@ class JitsiBot:
         output_path: str,
         duration: Optional[float] = None,
         token: Optional[str] = None,
+        xmpp_domain: Optional[str] = None,
+        conference_domain: Optional[str] = None,
     ):
         self.server = server
         self.room_name = room_name
         self.output_path = output_path
         self.duration = duration
         self.token = token
+        self.xmpp_domain = xmpp_domain
+        self.conference_domain = conference_domain
 
         self._recorder = AudioRecorder(output_path)
         self._peer: Optional[WebRTCPeer] = None
@@ -71,6 +75,8 @@ class JitsiBot:
             on_session_terminate=self._on_session_terminate,
             token=self.token,
             nick="recorder",
+            xmpp_domain=self.xmpp_domain,
+            conference_domain=self.conference_domain,
         )
 
         try:
