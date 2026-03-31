@@ -15,6 +15,14 @@ python3.9 -m pip install -r requirements.txt
 
 ## Basic Usage
 
+Simple run (minimal parameters):
+
+```bash
+/opt/homebrew/bin/python3.9 bot.py --room testroom-bot-xyz123 --duration 20 --output ~/rec.wav
+```
+
+Same command in multiline form:
+
 ```bash
 /opt/homebrew/bin/python3.9 bot.py \
   --host meet.jit.si \
@@ -75,4 +83,3 @@ You can force a start mode for debugging via env var:
 ```bash
 JITSI_BOT_ICE_MODE=host /opt/homebrew/bin/python3.9 bot.py --host meet.jit.si --room test --output ~/rec.wav
 ```
-
