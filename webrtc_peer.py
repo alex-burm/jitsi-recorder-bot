@@ -24,11 +24,13 @@ class WebRTCPeer:
         self._on_track = on_track
         self._ice_gathering_done = asyncio.Event()
         self._connected = asyncio.Event()
+        self._set_local_task: Optional[asyncio.Task] = None
+        self._early_connect_task: Optional[asyncio.Task] = None
 
     def _create_pc(self, ice_servers: list = None):
         from aiortc import RTCConfiguration, RTCIceServer
         config = None
-        if ice_servers:
+        if ice_servers is not None:
             rtc_servers = []
             for s in ice_servers:
                 urls = s.get("urls", "")
@@ -38,9 +40,8 @@ class WebRTCPeer:
                     rtc_servers.append(RTCIceServer(urls=urls, username=username, credential=credential))
                 else:
                     rtc_servers.append(RTCIceServer(urls=urls))
-            if rtc_servers:
-                config = RTCConfiguration(iceServers=rtc_servers)
-                logger.info(f"Using {len(rtc_servers)} ICE servers")
+            config = RTCConfiguration(iceServers=rtc_servers)
+            logger.info(f"Using {len(rtc_servers)} ICE servers")
         self._pc = RTCPeerConnection(configuration=config)
 
         @self._pc.on("icecandidate")
@@ -88,7 +89,12 @@ class WebRTCPeer:
         def on_signaling_state():
             logger.debug(f"Signaling state: {self._pc.signalingState}")
 
-    async def create_answer(self, offer_sdp: str, ice_servers: list = None) -> str:
+    async def create_answer(
+        self,
+        offer_sdp: str,
+        ice_servers: list = None,
+        fast_start: bool = True,
+    ) -> str:
         """
         Accept an SDP offer and return an SDP answer.
         """
@@ -100,10 +106,30 @@ class WebRTCPeer:
         await self._pc.setRemoteDescription(offer)
 
         answer = await self._pc.createAnswer()
-        await self._pc.setLocalDescription(answer)
 
-        logger.debug(f"Local description (answer):\n{self._pc.localDescription.sdp[:500]}...")
-        return self._pc.localDescription.sdp
+        if not fast_start:
+            await self._pc.setLocalDescription(answer)
+            logger.debug(f"Local description (answer):\n{self._pc.localDescription.sdp[:500]}...")
+            return self._pc.localDescription.sdp
+
+        # Low-latency path: send answer immediately, gather ICE in background and trickle candidates.
+        async def _set_local():
+            await self._pc.setLocalDescription(answer)
+
+        self._set_local_task = asyncio.ensure_future(_set_local())
+
+        # aiortc calls __connect() only after full gather; start probing connect early.
+        self._early_connect_task = asyncio.ensure_future(self._run_early_connect())
+
+        # Give aiortc a brief chance to populate localDescription with ICE ufrag/pwd.
+        for _ in range(20):
+            if self._pc.localDescription is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        local_sdp = self._pc.localDescription.sdp if self._pc.localDescription else answer.sdp
+        logger.debug(f"Local description (fast answer):\n{local_sdp[:500]}...")
+        return local_sdp
 
     async def add_ice_candidate(self, candidate_dict: dict):
         """Add a remote ICE candidate."""
@@ -141,6 +167,41 @@ class WebRTCPeer:
             return False
 
     async def close(self):
+        if self._early_connect_task and not self._early_connect_task.done():
+            self._early_connect_task.cancel()
+        if self._set_local_task and not self._set_local_task.done():
+            self._set_local_task.cancel()
         if self._pc:
             await self._pc.close()
             self._pc = None
+
+    async def _run_early_connect(self):
+        """
+        Trigger aiortc private __connect while ICE gathering is still in progress.
+        This avoids waiting for full gather completion before connectivity checks start.
+        """
+        if not self._pc:
+            return
+        connect_fn = getattr(self._pc, "_RTCPeerConnection__connect", None)
+        if not callable(connect_fn):
+            return
+
+        try:
+            while self._pc and not self._connected.is_set():
+                try:
+                    await connect_fn()
+                except Exception:
+                    # Expected while candidates/remote params are still incomplete.
+                    pass
+
+                if self._set_local_task and self._set_local_task.done():
+                    # One extra attempt right after setLocalDescription completes.
+                    try:
+                        await connect_fn()
+                    except Exception:
+                        pass
+                    return
+
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            return

@@ -420,7 +420,7 @@ class XMPPWebSocketClient:
         finally:
             self._pending_iq.pop(iq_id, None)
 
-    async def _request_conference(self):
+    async def _request_conference(self, timeout: float = 1.5):
         """Request conference allocation from focus (Jicofo)."""
         iq_id = _rand_id()
         machine_uid = uuid.uuid4().hex
@@ -435,7 +435,7 @@ class XMPPWebSocketClient:
 
         try:
             logger.info(f"Sending conference request to {self.focus_target_jid}")
-            result = await self._send_iq_wait(iq, iq_id, timeout=10.0)
+            result = await self._send_iq_wait(iq, iq_id, timeout=timeout)
             if result.get("type") == "error":
                 logger.warning("Conference request returned IQ error; continuing anyway")
                 return
@@ -454,7 +454,9 @@ class XMPPWebSocketClient:
                     self._focus_jid = focus_jid
                 logger.info(f"Conference request ready={ready}")
         except asyncio.TimeoutError:
-            logger.warning("Conference request timed out; continuing with MUC join")
+            logger.info(
+                f"Conference request timeout after {timeout:.1f}s; continuing with MUC join"
+            )
         except Exception as e:
             logger.warning(f"Conference request failed: {e}")
 
@@ -544,9 +546,6 @@ class XMPPWebSocketClient:
             f'<x xmlns="{NS_MUC}">'
             f'<history maxstanzas="0"/>'
             f'</x>'
-            f'<features>'
-            f'<feature var="http://jitsi.org/protocol/jigasi"/>'
-            f'</features>'
             f'<nick xmlns="http://jabber.org/protocol/nick">{self.nick}</nick>'
             f'<c xmlns="http://jabber.org/protocol/caps" '
             f'hash="sha-1" '

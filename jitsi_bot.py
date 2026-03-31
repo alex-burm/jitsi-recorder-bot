@@ -3,6 +3,7 @@ JitsiBot: orchestrates XMPP signaling and WebRTC media.
 """
 
 import asyncio
+import os
 import logging
 from typing import Optional
 from xml.etree import ElementTree as ET
@@ -39,10 +40,11 @@ class JitsiBot:
         self._pending_candidates: list = []      # local candidates buffered before session ready
         self._remote_candidates_buffer: list = []  # remote candidates buffered before PC ready
         self._pc_ready = False
-        self._candidate_tasks: list = []
         self._track_tasks: list = []
 
         self._stop_event: Optional[asyncio.Event] = None
+        self._ice_mode_sequence = self._build_ice_mode_sequence()
+        self._ice_mode_index = 0
 
     async def run(self):
         """Main entry point. Connects, records, stops."""
@@ -117,6 +119,53 @@ class JitsiBot:
         task = asyncio.ensure_future(self._recorder.track_handler(track))
         self._track_tasks.append(task)
 
+    def _build_ice_mode_sequence(self):
+        """
+        Build ICE fallback order.
+        Default is host -> stun -> full for low-latency with reliability fallback.
+        """
+        valid = ["host", "stun", "full"]
+        env_mode = os.getenv("JITSI_BOT_ICE_MODE", "").strip().lower()
+        if env_mode in valid:
+            start = valid.index(env_mode)
+            return valid[start:]
+        return valid
+
+    def _current_ice_mode(self) -> str:
+        return self._ice_mode_sequence[self._ice_mode_index]
+
+    def _advance_ice_mode(self) -> bool:
+        if self._ice_mode_index + 1 < len(self._ice_mode_sequence):
+            self._ice_mode_index += 1
+            return True
+        return False
+
+    def _ice_timeout_for_mode(self, mode: str) -> float:
+        if mode == "host":
+            return 2.5
+        if mode == "stun":
+            return 4.0
+        return 8.0
+
+    async def _reset_peer_for_new_session(self):
+        # Cancel active track tasks
+        for task in self._track_tasks:
+            task.cancel()
+        self._track_tasks.clear()
+
+        if self._peer:
+            await self._peer.close()
+        self._peer = WebRTCPeer(
+            on_ice_candidate=self._on_local_ice_candidate,
+            on_track=self._on_remote_track,
+        )
+
+        self._session_sid = None
+        self._focus_jid = None
+        self._pc_ready = False
+        self._pending_candidates.clear()
+        self._remote_candidates_buffer.clear()
+
     async def _on_session_initiate(
         self, jingle_elem: ET.Element, sid: str, from_jid: str
     ):
@@ -150,9 +199,30 @@ class JitsiBot:
             offer_sdp = jingle_to_sdp(jingle_elem)
             logger.debug(f"Converted offer SDP:\n{offer_sdp[:800]}")
 
-            ice_servers = self._xmpp.ice_servers if self._xmpp else []
-            logger.info("Session type: JVB")
-            answer_sdp = await self._peer.create_answer(offer_sdp, ice_servers=ice_servers)
+            raw_ice_servers = self._xmpp.ice_servers if self._xmpp else []
+            ice_mode = self._current_ice_mode()
+
+            if ice_mode == "full":
+                ice_servers = raw_ice_servers
+            elif ice_mode == "host":
+                ice_servers = []
+            else:
+                # Default low-latency mode: STUN-only.
+                ice_mode = "stun"
+                stun_only = [
+                    s for s in raw_ice_servers
+                    if str(s.get("urls", "")).startswith("stun:")
+                ]
+                ice_servers = stun_only if stun_only else []
+
+            logger.info(
+                f"Session type: JVB (ICE mode={ice_mode}, servers={len(ice_servers)})"
+            )
+            answer_sdp = await self._peer.create_answer(
+                offer_sdp,
+                ice_servers=ice_servers,
+                fast_start=True,
+            )
             logger.debug(f"Generated answer SDP:\n{answer_sdp[:800]}")
 
             # Convert answer SDP to Jingle session-accept
@@ -191,10 +261,22 @@ class JitsiBot:
 
             # Wait for ICE to connect
             logger.info("Waiting for ICE connection...")
-            connected = await self._peer.wait_connected(timeout=30.0)
+            connected = await self._peer.wait_connected(
+                timeout=self._ice_timeout_for_mode(ice_mode)
+            )
             if connected:
                 logger.info("ICE connected! Recording audio...")
             else:
+                # Auto-fallback only before any audio was actually captured.
+                if self._recorder.frame_count == 0 and self._advance_ice_mode():
+                    next_mode = self._current_ice_mode()
+                    logger.warning(
+                        f"ICE failed in mode={ice_mode}; switching to fallback mode={next_mode}"
+                    )
+                    self._xmpp.send_session_terminate(sid, from_jid)
+                    await self._reset_peer_for_new_session()
+                    return
+
                 logger.error("ICE connection failed — no audio will be recorded")
 
         except Exception as e:
@@ -205,26 +287,7 @@ class JitsiBot:
         if sid != self._session_sid:
             return
         logger.info(f"Session {sid} terminated — resetting peer for next session")
-
-        # Cancel active track tasks
-        for task in self._track_tasks:
-            task.cancel()
-        self._track_tasks.clear()
-
-        # Close old WebRTC peer
-        if self._peer:
-            await self._peer.close()
-            self._peer = WebRTCPeer(
-                on_ice_candidate=self._on_local_ice_candidate,
-                on_track=self._on_remote_track,
-            )
-
-        # Reset session state
-        self._session_sid = None
-        self._focus_jid = None
-        self._pc_ready = False
-        self._pending_candidates.clear()
-        self._remote_candidates_buffer.clear()
+        await self._reset_peer_for_new_session()
 
     async def _on_transport_info(self, jingle_elem: ET.Element, sid: str):
         """Handle incoming transport-info (remote ICE candidates)."""

@@ -46,6 +46,10 @@ class AudioRecorder:
             f"({self._frame_count / SAMPLE_RATE:.1f}s)"
         )
 
+    @property
+    def frame_count(self) -> int:
+        return self._frame_count
+
     async def write_frame(self, frame):
         """
         Accept an av.AudioFrame from aiortc and write PCM to WAV.
